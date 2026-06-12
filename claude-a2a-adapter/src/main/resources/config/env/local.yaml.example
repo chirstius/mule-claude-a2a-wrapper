@@ -1,0 +1,37 @@
+# =============================================================================
+# Claude A2A Wrapper - LOCAL (dev) environment overrides. Selected when env=local (the default).
+#
+# TEMPLATE: copy this file to  local.yaml  (which is gitignored) and fill in your own backend
+# coordinates. Non-secret properties only - secrets live in config/secure/local.yaml (also copied
+# from its .example). For prod: copy config/env/prod.yaml.example -> prod.yaml and deploy -M-Denv=prod.
+# =============================================================================
+
+claude:
+  # Backend coordinates from the claude-agent setup (claude-agent/setup.* writes these to ids.json/.env.local).
+  agentId: "agent_REPLACE_WITH_YOUR_AGENT_ID"
+  environmentId: "env_REPLACE_WITH_YOUR_ENVIRONMENT_ID"
+  # agentVersion: "1" # optional - pin an agent version (omit = always use the latest)
+
+a2a:
+  server:
+    listener:
+      host: "0.0.0.0"
+      port: "8081"
+    # The agent card's own public `url`, injected into the inline card (global.xml) at serve time.
+    # Set per deployment to the externally-reachable A2A base (e.g. the CloudHub URL + /a2a).
+    # Overridable in CloudHub Runtime Manager with no rebuild. See docs/CONFIG.md.
+    cardUrl: "http://localhost:8081/a2a"
+
+confirmation:
+  # Tool-confirmation action when the upstream agent surfaces a tool-use confirmation and no
+  # allow/deny-list entry applies:
+  #   defer = surface to the A2A caller as `input-required` (protocol-native HITL); the caller decides
+  #   allow = auto-approve, never surface;   deny = auto-reject, never surface
+  default: "defer"
+
+diag:
+  # Feature flag for the server-side /diag/fetch diagnostic (src/main/mule/a2a-diag.xml). "true" exposes
+  # the SSRF-shaped probe (restricted to *.cloudhub.io hosts); "false" -> 404, does nothing. ON in local
+  # dev, keep OFF ("false") in prod. To remove the diagnostic ENTIRELY (more secure than the flag), just
+  # delete src/main/mule/a2a-diag.xml - it is fully self-contained.
+  enabled: "true"

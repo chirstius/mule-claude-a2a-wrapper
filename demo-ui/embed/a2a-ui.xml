@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         OPTIONAL demo UI — serves the built Vue SPA (dist/) at the app root via
+         http:load-static-resource. Real asset requests (/assets, images, …) pass
+         through to ${app.home}/dist; every other path falls back to index.html
+         (SPA). A2A requests on /a2a are owned by the connector (more specific
+         path), so they're unaffected.
+
+         Applied by demo-ui/embed/embed.(ps1|sh): copies the Vue build into the
+         wrapper's src/main/resources/dist/ (-> ${app.home}/dist at deploy) and
+         drops this flow in.
+         TO REMOVE: delete this file and src/main/resources/dist/.
+         ===================================================================== -->
+    <flow name="demo-ui" doc:name="Demo UI (static SPA)">
+        <!-- GET/HEAD only: the SPA fallback is for browser navigation. A non-GET request to a
+             non-/a2a path (e.g. a mis-routed A2A POST) now gets a clean 405 instead of being
+             silently absorbed as an HTML 200 — which previously masked a gateway mis-route. -->
+        <http:listener config-ref="HTTP_Listener_config" path="/*" allowedMethods="GET,HEAD" doc:name="GET|HEAD /*">
+            <http:error-response statusCode="#[vars.httpStatus default 500]"/>
+        </http:listener>
+        <ee:transform doc:name="SPA path rewrite">
+            <ee:message>
+                <ee:set-attributes><![CDATA[%dw 2.0
+import * from dw::core::Strings
+output application/java
+
+// Pass real static-asset requests straight through; route everything else to index.html.
+var passthru_routes = ['/css', '/js', '/img', '/assets']
+var passthru_files  = ['json', 'png', 'jpeg', 'svg', 'ico']
+
+fun remapRequestPath() =
+    if ( (passthru_routes contains substringBeforeLast(attributes.requestPath, '/'))
+         or (passthru_files contains substringAfterLast(attributes.requestPath, '.')) )
+        attributes.requestPath
+    else
+        "/"
+---
+{
+    requestPath: remapRequestPath(),
+    listenerPath: attributes.listenerPath,
+    rawRequestPath: attributes.rawRequestPath,
+    relativePath: attributes.relativePath,
+    version: attributes.version,
+    scheme: attributes.scheme,
+    method: attributes.method,
+    requestUri: attributes.requestUri,
+    rawRequestUri: attributes.rawRequestUri,
+    queryString: attributes.queryString,
+    localAddress: attributes.localAddress,
+    remoteAddress: attributes.remoteAddress,
+    queryParams: attributes.queryParams,
+    uriParams: attributes.uriParams,
+    headers: attributes.headers
+} as Object { class: "org.mule.extension.http.api.HttpRequestAttributes" }]]></ee:set-attributes>
+            </ee:message>
+        </ee:transform>
+        <http:load-static-resource doc:name="Serve from dist" resourceBasePath="${app.home}/dist">
+            <error-mapping sourceType="HTTP:NOT_FOUND" targetType="APP:404"/>
+        </http:load-static-resource>
+        <error-handler>
+            <on-error-propagate type="APP:404" doc:name="404">
+                <set-variable variableName="httpStatus" value="404"/>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+</mule>

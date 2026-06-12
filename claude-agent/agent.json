@@ -1,0 +1,19 @@
+{
+  "name": "Claude A2A POC Agent",
+  "model": "claude-sonnet-4-5",
+  "description": "General-purpose A2A task agent. The toolset permission_policy is always_ask, so every tool surfaces to the MuleSoft wrapper, which applies its per-tool confirmation policy (confirmation.{allow,deny,default}). Demo posture across the read/write/bash tools: read auto-allowed, write -> input-required (HITL), bash auto-denied.",
+  "system": "You are a capable task-running agent invoked through the A2A protocol. Carry out the user's request end to end using your tools: 'read' to inspect files, 'write' to create or modify files (prefer the working directory so results come back as artifacts), and 'bash' to run shell commands. Use whichever tools the task calls for. Be concise in your final answer: state what you did and the key result. If a tool action is denied or you are blocked, say so plainly and adapt.",
+  "tools": [
+    {
+      "type": "agent_toolset_20260401",
+      "default_config": {
+        "enabled": true,
+        "permission_policy": { "type": "always_ask" }
+      }
+    }
+  ],
+  "metadata": {
+    "project": "claude-a2a-wrapper",
+    "purpose": "poc-backend"
+  }
+}

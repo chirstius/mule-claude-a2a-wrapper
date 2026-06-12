@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         HITL task-state helpers, shared by the blocking (a2a-server.xml) and
+         streaming (a2a-stream.xml) entry flows. Realigned to the A2A spec for
+         input-required continuation:
+           - A paused `input-required` task is resumed by a follow-up message that
+             REUSES the same taskId (and a matching contextId). The connector exposes
+             these on attributes; we persist the pending confirmation under BOTH the
+             taskId and the contextId so a continuation correlates regardless of which
+             one the broker preserves (dual-key).
+           - The continuation's content may be plain text OR a structured data part
+             ("the agent determines what input format is acceptable" — A2A spec). A
+             generic broker relays a human's "approve"/"deny" as TEXT, so we accept a
+             text reply (blanket allow/deny over all pending tools) AND still honour a
+             structured tool-confirmation-response DataPart (per-tool, e.g. the Vue UI).
+         Tracked follow-up (#23): per-tool granularity over a generic broker.
+         ===================================================================== -->
+
+    <!-- LOAD pending state into vars.taskRec (sentinel '__NONE__' if none).
+         Look up by taskId first (the spec-reused continuation key), then contextId.
+         Requires: vars.taskId, vars.contextId. -->
+    <sub-flow name="taskstate-load" doc:name="taskstate-load">
+        <os:retrieve key="#[vars.taskId]" objectStore="taskState" target="taskRec" doc:name="by taskId">
+            <os:default-value>#['__NONE__']</os:default-value>
+        </os:retrieve>
+        <choice doc:name="fallback to contextId?">
+            <when expression="#[not (vars.taskRec is Object)]">
+                <os:retrieve key="#[vars.contextId]" objectStore="taskState" target="taskRec" doc:name="by contextId">
+                    <os:default-value>#['__NONE__']</os:default-value>
+                </os:retrieve>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <!-- SAVE pending state under BOTH keys (taskId + contextId). The record carries the
+         keys it was stored under so taskstate-clear can remove exactly those.
+         Requires: vars.taskId, vars.contextId, vars.sessionId, vars.pendingTools. -->
+    <sub-flow name="taskstate-save" doc:name="taskstate-save">
+        <set-variable variableName="taskRecValue" doc:name="record"
+            value="#[output application/java --- { sessionId: vars.sessionId, contextId: vars.contextId, taskId: vars.taskId, pending: (vars.pendingTools default []), toolUses: (vars.toolUses default {}), auto: (vars.confirmEvents default []) }]"/>
+        <os:store key="#[vars.taskId]" objectStore="taskState" doc:name="store by taskId">
+            <os:value>#[vars.taskRecValue]</os:value>
+        </os:store>
+        <os:store key="#[vars.contextId]" objectStore="taskState" doc:name="store by contextId">
+            <os:value>#[vars.taskRecValue]</os:value>
+        </os:store>
+    </sub-flow>
+
+    <!-- CLEAR pending state (no-op when there was none). Removes the exact keys the record
+         was stored under; each remove is guarded so a missing key is not an error.
+         Requires: vars.taskRec. -->
+    <sub-flow name="taskstate-clear" doc:name="taskstate-clear">
+        <choice doc:name="had pending?">
+            <when expression="#[vars.taskRec is Object]">
+                <try doc:name="remove taskId key">
+                    <os:remove key="#[vars.taskRec.taskId default vars.taskId]" objectStore="taskState" doc:name="remove by taskId"/>
+                    <error-handler>
+                        <on-error-continue type="OS:KEY_NOT_FOUND" logException="false" doc:name="ignore missing"/>
+                    </error-handler>
+                </try>
+                <try doc:name="remove contextId key">
+                    <os:remove key="#[vars.taskRec.contextId default vars.contextId]" objectStore="taskState" doc:name="remove by contextId"/>
+                    <error-handler>
+                        <on-error-continue type="OS:KEY_NOT_FOUND" logException="false" doc:name="ignore missing"/>
+                    </error-handler>
+                </try>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <!-- RESUME-PRIME a paused session from a continuation message. Sets vars.sessionId /
+         contextId / turnAction='confirm' and derives vars.confirmEvents from EITHER a
+         structured tool-confirmation-response DataPart (per-tool) OR a plain-text reply
+         (blanket allow/deny over all pending tools, fail-closed when ambiguous).
+         Requires: vars.taskRec (Object), vars.confirmResponse (may be null), vars.userPrompt. -->
+    <sub-flow name="taskstate-resume-prime" doc:name="taskstate-resume-prime">
+        <set-variable variableName="sessionId" doc:name="resume session" value="#[vars.taskRec.sessionId]"/>
+        <set-variable variableName="contextId" doc:name="resume context"
+            value="#[output application/java --- (vars.taskRec.contextId default vars.contextId)]"/>
+        <ee:transform doc:name="derive confirmations">
+            <ee:variables>
+                <ee:set-variable variableName="confirmEvents"><![CDATA[%dw 2.0
+output application/java
+// Pending tools captured when the session paused (input-required).
+var pend = (vars.taskRec.pending default [])
+// (a) Structured DataPart from a programmatic caller (e.g. the Vue UI) — per-tool decisions.
+var fromData = ((vars.confirmResponse.decisions default []) map ((d) ->
+    { tool_use_id: d.toolUseId, result: (d.result default 'deny') }
+      ++ (if ((d.result default '') == 'deny') { denyMessage: (d.denyMessage default 'Denied by caller') } else {})))
+// (b) Plain-text reply from a human/broker — blanket allow/deny over ALL pending tools.
+var t = lower(trim(vars.userPrompt default ''))
+var words = ((t splitBy /[^a-z]+/) filter ((w) -> w != ''))
+fun anyWord(ws) = (sizeOf(ws filter ((w) -> words contains w))) > 0
+fun anyPhrase(ps) = (sizeOf(ps filter ((p) -> t contains p))) > 0
+var affirmative = anyWord(['approve','approved','yes','yeah','yep','allow','ok','okay','proceed','confirm','sure']) or anyPhrase(['go ahead','do it'])
+var negative = anyWord(['deny','denied','no','nope','reject','cancel','decline','stop'])
+// Fail closed: only allow on a clear affirmative with no negation present.
+var blanket = if (affirmative and (not negative)) 'allow' else 'deny'
+var fromText = (pend map ((p) ->
+    { tool_use_id: p.toolUseId, result: blanket }
+      ++ (if (blanket == 'deny') { denyMessage: 'Denied by user' } else {})))
+---
+// Send the carried auto allow/deny (from the original requires_action batch) TOGETHER with the
+// caller's decision on the deferred tools, so the managed-agent session gets the complete confirmation
+// set at once and doesn't re-emit a partial requires_action (the multi-approve loop).
+(vars.taskRec.auto default []) ++ (if ((sizeOf(vars.confirmResponse.decisions default [])) > 0) fromData else fromText)]]></ee:set-variable>
+                <!-- The user's blanket decision becomes the policy DEFAULT for the resume turn: the
+                     managed agent re-emits requires_action on reconnect, and since the user already
+                     approved (or denied) this action, re-requested tools must auto-resolve to their
+                     decision instead of deferring again (which caused the multi-approve loop). The
+                     deny-list still wins, so e.g. bash stays denied even on an approve-resume. -->
+                <ee:set-variable variableName="resumeDefault"><![CDATA[%dw 2.0
+output application/java
+var t = lower(trim(vars.userPrompt default ''))
+var words = ((t splitBy /[^a-z]+/) filter ((w) -> w != ''))
+fun anyWord(ws) = (sizeOf(ws filter ((w) -> words contains w))) > 0
+fun anyPhrase(ps) = (sizeOf(ps filter ((p) -> t contains p))) > 0
+var affirmative = anyWord(['approve','approved','yes','yeah','yep','allow','ok','okay','proceed','confirm','sure']) or anyPhrase(['go ahead','do it'])
+var negative = anyWord(['deny','denied','no','nope','reject','cancel','decline','stop'])
+---
+if (affirmative and (not negative)) 'allow' else 'deny']]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <set-variable variableName="turnAction" doc:name="turnAction=confirm" value="#['confirm']"/>
+    </sub-flow>
+
+</mule>

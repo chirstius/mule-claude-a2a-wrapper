@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         Tool-confirmation POLICY RESOLVER.
+         Input : vars.pendingCandidates = [ { toolUseId, 'type', name, server? } ]
+                 (built by the engine from a requires_action stop_reason).
+         Output: vars.resolved = [ { toolUseId, name, 'type', key, decision } ]
+                 decision in { "allow", "deny", "defer" }.
+         Policy (from application.yaml confirmation.{allow,deny,default}):
+                 deny-list match -> deny  (deny wins; fail-safe)
+                 allow-list match -> allow
+                 otherwise        -> default
+         Canonical tool key matched against the CSV glob patterns:
+                 agent tool : "tool_use:<name>"                e.g. tool_use:write
+                 mcp tool   : "mcp_tool_use:<server>/<name>"   e.g. mcp_tool_use:github/create_issue
+         Patterns support '*' wildcards and are matched case-insensitively.
+         ===================================================================== -->
+    <sub-flow name="claude-confirm-resolve" doc:name="claude-confirm-resolve">
+        <ee:transform doc:name="resolve decisions">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+
+var allowList = ((p('confirmation.allow') default "") splitBy ",") map ((x) -> trim(x)) filter ((x) -> x != "")
+var denyList  = ((p('confirmation.deny')  default "") splitBy ",") map ((x) -> trim(x)) filter ((x) -> x != "")
+// On a resume/confirm turn the user already decided this action: use their decision as the default
+// (so the agent's re-emitted requires_action auto-resolves instead of deferring again). The deny-list
+// is still applied first, so denied tools (e.g. bash) stay denied even on an approve-resume.
+var dflt      = if ((vars.turnAction default "message") == "confirm") (vars.resumeDefault default "deny") else lower(p('confirmation.default') default "defer")
+
+fun globMatch(text, glob) = do {
+    var t    = lower(text)
+    var g    = lower(glob)
+    var segs = (g splitBy "*")
+    ---
+    if (not (g contains "*"))
+        (t == g)
+    else (
+        (t startsWith (segs[0] default ""))
+        and (if (g endsWith "*") true else (t endsWith (segs[-1] default "")))
+        and ((sizeOf((segs filter ((s) -> s != "")) filter ((m) -> not (t contains m)))) == 0)
+    )
+}
+// First glob in a list that matches the key (null if none) - so we can report WHICH rule decided.
+fun firstMatch(theKey, pats) = (pats filter ((pat) -> globMatch(theKey, pat)))[0]
+
+fun toolKey(c) =
+    if ((c.'type' default "") == "agent.mcp_tool_use")
+        ("mcp_tool_use:" ++ lower((c.server default "_")) ++ "/" ++ lower(c.name default ""))
+    else
+        ("tool_use:" ++ lower(c.name default ""))
+
+// Decision + the reason it was made (which config key + which pattern), so the caller can be told.
+fun decideWithReason(theKey) = do {
+    var dm = firstMatch(theKey, denyList)
+    var am = firstMatch(theKey, allowList)
+    ---
+    if (dm != null)      { decision: "deny",  reasonSource: "confirmation.deny",    reasonRule: dm }
+    else if (am != null) { decision: "allow", reasonSource: "confirmation.allow",   reasonRule: am }
+    else                 { decision: dflt,    reasonSource: "confirmation.default", reasonRule: dflt }
+}
+---
+(vars.pendingCandidates default []) map ((c) -> do {
+    var k = toolKey(c)
+    var d = decideWithReason(k)
+    ---
+    {
+        toolUseId: c.toolUseId,
+        name: (c.name default ""),
+        "type": (c.'type' default ""),
+        key: k,
+        decision: d.decision,
+        reasonSource: d.reasonSource,
+        reasonRule: d.reasonRule
+    }
+})]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="resolved" doc:name="resolved" value="#[payload]"/>
+    </sub-flow>
+
+</mule>

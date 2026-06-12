@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+    <!-- =====================================================================
+         A2A authorization listener. The connector REQUIRES this source to
+         process privileged verbs (tasks/cancel rejects with -32005 otherwise).
+         Completing the flow AUTHORIZES (allows) the operation; raising an error
+         would deny it. We allow everything (no edge auth here) and, for
+         tasks/cancel, also propagate the cancel to Claude via user.interrupt so
+         the agent actually stops (the connector only marks the task 'canceled').
+
+         The listener exposes the request on `attributes`:
+           attributes.jsonRpcMethod  e.g. "tasks/cancel"
+           attributes.taskId         the task being acted on (also payload.id)
+           attributes.contextId      (null for cancel)
+         ===================================================================== -->
+    <flow name="a2a-authorize" doc:name="A2A authorization">
+        <a2a:authorization-listener config-ref="A2A_Server_config" doc:name="On Authorization"/>
+        <choice doc:name="cancel?">
+            <when expression="#[(attributes.jsonRpcMethod default '') == 'tasks/cancel']">
+                <set-variable variableName="taskId" doc:name="taskId" value="#[output application/java --- (attributes.taskId default payload.id)]"/>
+                <!-- taskId -> Claude sessionId (written by claude-run-turn when the turn starts). -->
+                <os:retrieve key="#[vars.taskId]" objectStore="taskToSession" target="sessionId" doc:name="lookup session">
+                    <os:default-value>#['__NONE__']</os:default-value>
+                </os:retrieve>
+                <choice doc:name="session known?">
+                    <when expression="#[vars.sessionId != '__NONE__']">
+                        <logger level="INFO" doc:name="interrupting"
+                            message="#[output application/java --- ('tasks/cancel: interrupting Claude session ' ++ vars.sessionId ++ ' for task ' ++ vars.taskId)]"/>
+                        <flow-ref name="claude-interrupt" doc:name="user.interrupt"/>
+                    </when>
+                    <otherwise>
+                        <logger level="INFO" doc:name="no session"
+                            message="#[output application/java --- ('tasks/cancel: no live session mapped for task ' ++ (vars.taskId default 'null') ++ ' (already finished?)')]"/>
+                    </otherwise>
+                </choice>
+            </when>
+        </choice>
+        <!-- fall through = authorize/allow -->
+    </flow>
+
+</mule>

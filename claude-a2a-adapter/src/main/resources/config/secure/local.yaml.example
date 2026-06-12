@@ -1,0 +1,16 @@
+# =============================================================================
+# Claude A2A Wrapper - LOCAL secrets.
+#
+# TEMPLATE: copy this file to  local.yaml  (which is gitignored). It never holds a real key in the
+# committed template. Provide a valid Claude API key one of these ways:
+#    1. A launch argument (simplest for dev):  -M-Dclaude.apiKey=sk-ant-...
+#    2. A secured value below (Mule Secure Configuration Properties module):
+#       https://docs.mulesoft.com/mule-runtime/latest/secure-configuration-properties
+#    3. A Runtime Manager protected property (recommended for prod).
+#
+# The wrapper resolves the key as  p('claude.apiKey') default p('secure::claude.apiKey')
+# so the runtime '-Dclaude.apiKey' value wins when present.
+# =============================================================================
+
+claude:
+  apiKey: "![YOUR_API_KEY_HERE_OR_OVERRIDE_WITH_-Dclaude.apiKey]"

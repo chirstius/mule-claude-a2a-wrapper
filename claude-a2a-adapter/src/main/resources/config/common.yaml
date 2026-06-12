@@ -1,0 +1,67 @@
+# =============================================================================
+# Claude A2A Wrapper - Common Configuration Items
+# -----------------------------------------------------------------------------
+# Values here are the SAME across every environment. Anything that should vary per
+# environment lives in config/env/<env>.yaml . Secrets live in
+# config/secure/<env>.yaml . The active <env> is chosen by the 'env' property
+# (default 'local'; override at deploy with -M-Denv=prod or CH properties).
+# See docs/CONFIG.md.
+#
+# IMPORTANT: a given property key must appear in EXACTLY ONE file. Mule layers
+# the providers (common + env + secure) into one flat namespace; do not redefine
+# a key across files. Keys that vary by environment are intentionally absent here
+# and defined in config/env/<env>.yaml instead.
+# =============================================================================
+
+claude:
+  # Non-secret protocol constants for the Claude Managed Agents API. The agent it
+  # wraps (agentId/environmentId) is environment-specific -> config/env/<env>.yaml.
+  betaHeader: "managed-agents-2026-04-01"
+  anthropicVersion: "2023-06-01"
+
+a2a:
+  server:
+    # Public A2A base path the connector serves on (agentPath). The AgentCard itself is
+    # served INLINE from <a2a:agent-card><a2a:json> in global.xml; its public `url` is
+    # injected from the a2a.server.cardUrl property (set per environment in env/<env>.yaml,
+    # or overridden in CloudHub Runtime Manager with no rebuild). See docs/CONFIG.md.
+    path: "/a2a"
+
+# -----------------------------------------------------------------------------
+# Tool-confirmation policy
+# Allows for wrapper-level 'overrides' for tool usage confirmations that surface
+# from the underlying managed agent.
+# 
+# The default posture setting (defer, allow, deny) is set in the env/<env>.yaml
+# file(s) to allow for flexibilty (e.g. allow all in dev, defer in prod)
+#
+# The settings here provide a global allow/deny-list capability for specific tools.
+# NOTE: These rules can only apply to tools that are configured to 'always_ask'
+# in the upstream agent's tool permissions. For example - If you 'deny' a tool here
+# that is set to 'always_allow' in the upstream agent - the tool will always RUN,
+# becuase the agent will never surface the confirmation 'ask' to this wrapper, it
+# will just use the tool. Same for the inverse, you cannot 'allow' a tool here that
+# isn't available to the upstream agent, or already allowed to run (it will still
+# run, but the presence in this list will be superflous)
+#
+# For each tool confirmation 'ask' the wrapper applies rules in this order:
+#     deny-list match  -> Always deny,never surface to HITL (deny wins any ties)
+#     allow-list match -> Automatically allow (send positive response), never surface to HITL
+#     otherwise        -> Apply 'confirmation.default' setting per environment configs
+
+#
+# Pattern key format:  "<toolType>:<server-or-_>/<name>"  with `*` wildcards
+# EXAMPLES:
+#   tool_use:Bash
+#   mcp_tool_use:exchange-mcp/create_asset
+#   mcp_tool_use:*/delete_*
+# -----------------------------------------------------------------------------
+confirmation:
+  # Comma-separated tool-key patterns (empty = none).
+  # The wrapped agent's toolset is permission_policy=always_ask, so every tool surfaces here and
+  # this policy routes it. Demo posture across the agent's read/write/bash tools:
+  #   read  -> auto-allow (runs silently)        write -> falls through to confirmation.default (defer = HITL)
+  #   bash  -> auto-deny  (blocked by policy)
+  # Example: allow: "mcp_tool_use:exchange-mcp/search_*,tool_use:read"
+  allow: "tool_use:read"
+  deny: "tool_use:bash"

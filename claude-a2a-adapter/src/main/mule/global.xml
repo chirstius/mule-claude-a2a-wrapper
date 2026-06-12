@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:secure-properties="http://www.mulesoft.org/schema/mule/secure-properties"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/secure-properties http://www.mulesoft.org/schema/mule/secure-properties/current/mule-secure-properties.xsd">
+
+    <!-- =====================================================================
+         Externalised configuration — layered, environment-aware (see docs/CONFIG.md):
+           config/common.yaml         env-agnostic settings (committed)
+           config/env/${env}.yaml     per-environment NON-secret values
+           config/secure/${env}.yaml  secrets (claude.apiKey) via the Secure Properties module
+         The active environment is chosen by `env` (default 'local'); override at deploy:
+           -M-Denv=prod
+         `secure.key` decrypts ![...] tokens in the secure file; override at deploy:
+           -M-Dsecure.key=<key>     (a dev default is provided so local boots out of the box).
+         Each property key must appear in exactly ONE file (the providers layer, not merge).
+         ===================================================================== -->
+    <global-property name="env"        value="local"            doc:name="default env"/>
+    <global-property name="secure.key" value="devdevdevdev1234" doc:name="default secure key (dev)"/>
+
+    <configuration-properties file="config/common.yaml"     doc:name="common config"/>
+    <configuration-properties file="config/env/${env}.yaml" doc:name="env config"/>
+
+    <!-- Secret values live here as ![...] tokens, decrypted with ${secure.key} and read via
+         secure::<key>. Plain (unwrapped) values pass through untouched, so the committed
+         local file can hold a non-secret placeholder while the real key is injected with
+         -M-Dclaude.apiKey (which wins: see claude-headers in claude-client.xml). -->
+    <secure-properties:config name="Secure_Properties" doc:name="Secure Properties"
+                              file="config/secure/${env}.yaml" key="${secure.key}">
+        <secure-properties:encrypt algorithm="AES" mode="CBC"/>
+    </secure-properties:config>
+
+    <!-- ============ A2A SERVER (inbound) ============ -->
+    <http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config">
+        <http:listener-connection host="${a2a.server.listener.host}" port="${a2a.server.listener.port}"/>
+    </http:listener-config>
+
+    <a2a:server-config name="A2A_Server_config" doc:name="A2A Server config">
+        <a2a:connection listenerConfig="HTTP_Listener_config" agentPath="${a2a.server.path}"/>
+        <!-- Card location is configurable (config/common.yaml a2a.server.agentCard). -->
+        <a2a:agent-card>
+            <a2a:json><![CDATA[{
+  "protocolVersion": "0.3.0",
+  "name": "Claude Managed Agent (A2A)",
+  "description": "A Claude managed agent exposed over A2A by a MuleSoft wrapper. Runs general-purpose tasks in an isolated cloud sandbox and returns results as A2A artifacts. Multi-turn conversations are preserved via A2A contextId.",
+  "url": "${a2a.server.cardUrl}",
+  "version": "0.1.0",
+  "provider": {
+    "organization": "Hirstius Inc.",
+    "url": "https://example.com"
+  },
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false,
+    "extensions": [
+      {
+        "uri": "https://anypoint-poc.example.com/a2a/ext/tool-confirmation/v1",
+        "description": "When the wrapped agent pauses for tool approval and the wrapper is configured to defer, the task enters 'input-required' carrying a DataPart {kind:'tool-confirmation-request', pending:[{toolUseId,toolType,name,server?,input}]}. Answer by sending a message on the same taskId/contextId with a DataPart {kind:'tool-confirmation-response', decisions:[{toolUseId, result:'allow'|'deny', denyMessage?}]}.",
+        "required": false
+      }
+    ]
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain", "text/markdown"],
+  "skills": [
+    {
+      "id": "general-task",
+      "name": "General task execution",
+      "description": "Carries out open-ended tasks: research, analysis, code, file generation, and data wrangling, using a sandboxed toolset (file I/O, shell, web). Returns produced files as artifacts.",
+      "tags": ["general", "coding", "research", "files", "automation"],
+      "examples": [
+        "Summarize the attached requirements and produce a markdown spec.",
+        "Write a Python script that parses this CSV and output the cleaned file.",
+        "Research current A2A protocol adopters and return a short report."
+      ],
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain", "text/markdown"]
+    }
+  ]
+}]]></a2a:json>
+        </a2a:agent-card>
+        <!-- Task-history (<a2a:history>) intentionally left at connector defaults — see
+             config/common.yaml note. Add it here if you want to experiment with the capability. -->
+    </a2a:server-config>
+
+    <!-- ============ CLAUDE MANAGED AGENTS API (outbound) ============ -->
+    <http:request-config name="Anthropic_API_config" doc:name="Anthropic API">
+        <http:request-connection protocol="HTTPS" host="api.anthropic.com" port="443" streamResponse="true"/>
+    </http:request-config>
+
+    <!-- Dedicated config for the live SSE stream. usePersistentConnections=false so the connection
+         is NOT pooled/kept alive: we abandon the (infinite) stream at end-of-turn, and a pooled
+         connection would linger and take Claude's next keep-alive byte into a closed buffer
+         ("onErrorDropped"). Non-persistent lets it close when the flow's event is cleaned up. -->
+    <http:request-config name="Anthropic_SSE_config" doc:name="Anthropic SSE">
+        <http:request-connection protocol="HTTPS" host="api.anthropic.com" port="443"
+                                 streamResponse="true" usePersistentConnections="false"/>
+    </http:request-config>
+
+    <!-- ============ STATE STORES ============ -->
+    <!-- contextId -> Claude sessionId (conversation continuity). -->
+    <os:object-store name="contextToSession" doc:name="contextToSession"
+                     persistent="true"/>
+    <!-- contextId -> { sessionId, contextId, pending[] } : pending tool confirmations for a paused
+         session, so an A2A input-required answer correlates back to it. Keyed by contextId (the
+         client echoes it to continue), cleared when the turn completes. -->
+    <os:object-store name="taskState" doc:name="taskState"
+                     persistent="true"/>
+    <!-- taskId -> Claude sessionId. Written when a turn starts so the authorization-listener can
+         resolve a tasks/cancel (which carries only the taskId, no contextId) to the session and
+         send user.interrupt. -->
+    <os:object-store name="taskToSession" doc:name="taskToSession"
+                     persistent="true"/>
+
+</mule>

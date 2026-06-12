@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         BLOCKING path: A2A message/send  ->  Claude session run-to-idle.
+         Maps DESIGN.md §5 (state), §6 (entry points), §7 (durable answer).
+         ===================================================================== -->
+    <flow name="a2a-message-send" doc:name="A2A message/send (blocking)">
+        <a2a:task-listener doc:name="On Task" config-ref="A2A_Server_config"/>
+
+        <!-- 1) Pull A2A request fields. Prefer the connector's own taskId/contextId from attributes
+             (as the streaming listener does): A2A connector 1.1.1+ VALIDATES that the response Task's
+             id/contextId match the request's, so the response must echo the connector-assigned ids
+             rather than minting our own (which 1.1.1 rejects with -32603 "Request and response task id
+             or context id ... don't match"). Fall back to payload/uuid for older behavior. -->
+        <set-variable variableName="taskId"    value="#[output application/java --- (attributes.taskId default payload.id default uuid())]" doc:name="taskId"/>
+        <!-- Client's contextId arrives on the message (payload.message.contextId), not top-level. -->
+        <set-variable variableName="contextId" value="#[output application/java --- (attributes.contextId default payload.message.contextId default payload.contextId default ('ctx-' ++ vars.taskId))]" doc:name="contextId"/>
+        <set-variable variableName="userPrompt"
+            value="#[output application/java --- ((payload.message.parts default []) filter ((p) -> ((p.kind default p.'type') default '') == 'text') map ((p) -> (p.text default '')) joinBy '\n')]"
+            doc:name="userPrompt (all text parts)"/>
+        <!-- A tool-confirmation-response DataPart (caller answering a prior input-required). -->
+        <set-variable variableName="confirmResponse"
+            value="#[output application/java --- (((payload.message.parts default []) filter ((p) -> ((p.kind default '') == 'data') and (((p.data.'type') default '') == 'tool-confirmation-response')) map ((p) -> p.data))[0])]"
+            doc:name="confirmResponse (if any)"/>
+        <!-- DIAG (gated by diag.enabled): capture exactly what the broker sends, so we can see
+             whether a HITL continuation reaches us and which taskId/contextId/parts it carries. -->
+        <choice doc:name="diag inbound?">
+            <when expression="#[(p('diag.enabled') default 'false') == 'true']">
+                <logger level="INFO" doc:name="DIAG inbound (send)"
+                    message="#[output application/json --- { tag: 'DIAG-INBOUND', src: 'message/send', attr: { taskId: (attributes.taskId default null), contextId: (attributes.contextId default null) }, msg: { taskId: (payload.message.taskId default payload.id default null), contextId: (payload.message.contextId default payload.contextId default null), referenceTaskIds: (payload.message.referenceTaskIds default null), parts: (payload.message.parts default null) } }]"/>
+            </when>
+        </choice>
+
+        <!-- Load any paused confirmation state for this task (dual-key: taskId then contextId;
+             see a2a-taskstate.xml). Sentinel '__NONE__' when there is none. -->
+        <flow-ref name="taskstate-load" doc:name="load task state"/>
+
+        <try doc:name="run session">
+            <!-- 2a) Decide: HITL continuation (resume paused session) vs a fresh turn. -->
+            <choice doc:name="continuation or new turn?">
+                <!-- Pending state exists => this inbound message IS the HITL answer (text or DataPart).
+                     resume-prime derives vars.confirmEvents and sets sessionId/contextId/turnAction. -->
+                <when expression="#[vars.taskRec is Object]">
+                    <flow-ref name="taskstate-resume-prime" doc:name="resume paused session"/>
+                </when>
+                <otherwise>
+                    <set-variable variableName="turnAction" doc:name="turnAction=message" value="#['message']"/>
+                </otherwise>
+            </choice>
+
+            <!-- 2b) Run the turn via the SHARED engine (streamMode=false: aggregate only, no relay).
+                    Leaves vars.outcome, vars.finalText, vars.fileArtifacts, vars.pendingTools. -->
+            <set-variable variableName="streamMode" doc:name="streamMode" value="#[false]"/>
+            <flow-ref name="claude-run-turn" doc:name="run turn (consume SSE)"/>
+
+            <!-- 3) Build the A2A Task from the outcome. -->
+            <choice doc:name="outcome?">
+                <when expression="#[(vars.outcome default 'completed') == 'input-required']">
+                    <!-- Persist pending state (dual-key: taskId + contextId) so the caller's answer
+                         correlates back regardless of which id the broker preserves. -->
+                    <flow-ref name="taskstate-save" doc:name="save pending state"/>
+                    <ee:transform doc:name="input-required result">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var calls = (vars.pendingTools default []) map ((t) -> {
+    toolUseId: t.toolUseId,
+    name: (t.name default ""),
+    toolType: (t.'type' default "agent.tool_use"),
+    key: (t.key default ""),
+    "input": (t.'input' default {})
+})
+fun describe(t) = (t.name default "tool") ++ (if ((t.'input'.file_path?)) (" -> " ++ t.'input'.file_path) else "")
+---
+{
+  id: vars.taskId,
+  contextId: vars.contextId,
+  kind: "task",
+  status: {
+    state: "input-required",
+    message: {
+      role: "agent",
+      kind: "message",
+      messageId: uuid(),
+      parts: [
+        { kind: "text", text: ("Approval required before the agent can run: " ++ ((calls map ((c) -> describe(c))) joinBy ", ") ++ ". Reply \"approve\" to allow, or \"deny\" to reject. (Programmatic clients may send a tool-confirmation-response DataPart for per-tool decisions.)") },
+        { kind: "data", data: { "type": "tool-confirmation-request", taskId: vars.taskId, calls: calls } }
+      ]
+    }
+  }
+}]]></ee:set-payload>
+                        </ee:message>
+                    </ee:transform>
+                </when>
+                <otherwise>
+                    <!-- Completed: clear any pending state (no-op if none), return the answer. -->
+                    <flow-ref name="taskstate-clear" doc:name="clear pending state"/>
+                    <ee:transform doc:name="build A2A result">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+fun baseName(fp) = ((fp default "") splitBy "/")[-1] default "artifact"
+// Files written this turn PLUS any HITL-approved write gated last turn (its tool_use with content
+// fired before the pause, so recover it from the persisted pending state for 'allow' decisions).
+var approvedPending = ((if (vars.taskRec is Object) (vars.taskRec.pending default []) else []) filter ((t) -> (t.'input'.file_path?) and ((sizeOf((vars.confirmEvents default []) filter ((d) -> (d.tool_use_id == t.toolUseId) and ((d.result default '') == 'allow')))) > 0)) map ((t) -> { path: (t.'input'.file_path), content: (t.'input'.content default '') }))
+var allFiles = ((vars.fileArtifacts default []) ++ approvedPending)
+---
+{
+  id: vars.taskId,
+  contextId: vars.contextId,
+  kind: "task",
+  status: { state: "completed" },
+  artifacts: [
+    {
+      artifactId: "answer-" ++ vars.taskId,
+      name: "Answer",
+      parts: [ { kind: "text", text: (vars.finalText default "") } ]
+    }
+  ] ++ (allFiles groupBy ((f) -> f.path) pluck ((touches, path) -> {
+    artifactId: baseName(path),
+    name: baseName(path),
+    parts: [ { kind: "text", text: (touches[-1].content default "") } ]
+  }))
+}]]></ee:set-payload>
+                        </ee:message>
+                    </ee:transform>
+                </otherwise>
+            </choice>
+            <!-- VALIDATED: the non-streaming task-listener returns the flow's final `payload`
+                 as the JSON-RPC result, provided it is a valid A2A Task object (id, contextId,
+                 kind:"task", status:{state}, ...). The connector enriches it with
+                 status.timestamp and history[]. update-task-status is streaming-only. -->
+
+            <error-handler>
+                <!-- Map any failure to an A2A `failed` result (DESIGN.md §9). -->
+                <on-error-continue type="ANY" doc:name="-> failed">
+                    <logger level="ERROR" doc:name="log error"
+                        message="#[output application/java --- ('A2A_ERROR_HANDLER: ' ++ (error.errorType.identifier default '') ++ ' :: ' ++ (error.description default 'none'))]"/>
+                    <ee:transform doc:name="failed result">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  id: vars.taskId,
+  contextId: vars.contextId,
+  kind: "task",
+  status: {
+    state: "failed",
+    message: { kind: "message", role: "agent", messageId: uuid(), parts: [ { kind: "text", text: ("Session error: " ++ (error.description default "unknown")) } ] }
+  }
+}]]></ee:set-payload>
+                        </ee:message>
+                    </ee:transform>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <!-- =====================================================================
+         IMPLEMENTED elsewhere:
+         - streaming path:        a2a-stream.xml (a2a-message-stream + shared claude-run-turn).
+         - confirmation resolver: confirmation.xml (claude-confirm-resolve) + claude-run-turn's
+           requires_action handling; input-required round-trip wired in both entry flows here
+           and in a2a-stream.xml, with pending state persisted in the `taskState` object store.
+         TODO: tasks/cancel -> claude-interrupt.
+         ===================================================================== -->
+
+</mule>

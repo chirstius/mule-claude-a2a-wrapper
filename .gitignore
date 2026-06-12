@@ -1,0 +1,49 @@
+# Secrets & generated IDs
+claude-agent/.env
+claude-agent/.env.local
+claude-agent/ids.json
+**/*.local
+
+# Real per-environment config — created by copying the committed *.example templates. The real
+# env/secure files are never tracked (they hold your agentId / API key); only the *.example
+# templates are committed. To run locally, copy each *.example to its real name (drop ".example").
+claude-a2a-adapter/src/main/resources/config/env/local.yaml
+claude-a2a-adapter/src/main/resources/config/env/prod.yaml
+claude-a2a-adapter/src/main/resources/config/secure/local.yaml
+claude-a2a-adapter/src/main/resources/config/secure/prod.yaml
+
+# Optional embedded demo UI overlay — applied locally by demo-ui/embed/embed.* when you want
+# the demonstrator served at the app root. Canonical sources live in demo-ui/; these are
+# built/copied into the wrapper on demand and are not committed (delete them to remove the demo).
+claude-a2a-adapter/src/main/resources/dist/
+claude-a2a-adapter/src/main/mule/a2a-ui.xml
+
+# Mule / Maven
+claude-a2a-adapter/target/
+*.jar
+
+# Anypoint Studio workspace (not project files)
+.metadata/
+.mule/
+.tooling/
+.tooling-apps-cache/
+
+# Eclipse/Studio per-project IDE files (regenerated on import from pom.xml)
+.project
+.classpath
+.settings/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+desktop.ini
+**/desktop.ini
+.idea/
+.vscode/
+*.iml
+
+# packaged skill artifacts (source: ~/.claude/skills/)
+*.skill
+
+# push-notification test receiver log
+webhook-received.log

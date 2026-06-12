@@ -1,0 +1,7 @@
+{
+  "name": "claude-a2a-poc-env",
+  "config": {
+    "type": "cloud",
+    "networking": { "type": "unrestricted" }
+  }
+}

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  App logging config (mirrors the Mule default app log4j2) with one addition: a RegexFilter
+  that DENIES the benign reactor "onErrorDropped" / "Trying to write in a closed buffer" lines.
+  Those come from abandoning Claude's never-ending SSE stream at end-of-turn (see DESIGN "Open
+  items"). Measured to be a bounded, self-draining connection (~30-60s), NOT a leak, so this is
+  purely cosmetic - everything else logs normally.
+-->
+<Configuration>
+
+    <Appenders>
+        <!-- app.name is unresolved during the early container buildMuleContext pass; without a
+             default the path becomes the literal "${sys:app.name}.log" (invalid filename) and log4j
+             logs an IOException at startup. The ":-claude-a2a-adapter" fallback keeps it a valid
+             filename until app.name binds, then app.name takes over normally. -->
+        <RollingFile name="file"
+                     fileName="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}${sys:app.name:-claude-a2a-adapter}.log"
+                     filePattern="${sys:mule.home}${sys:file.separator}logs${sys:file.separator}${sys:app.name:-claude-a2a-adapter}-%i.log">
+            <!-- Drop the benign SSE-abandon noise; pass everything else through unchanged. -->
+            <RegexFilter regex=".*(onErrorDropped|Trying to write in a closed buffer).*"
+                         onMatch="DENY" onMismatch="NEUTRAL"/>
+            <PatternLayout pattern="%-5p %d [%t] [processor: %X{processorPath}; event: %X{correlationId}] %c: %m%n"/>
+            <SizeBasedTriggeringPolicy size="10 MB"/>
+            <DefaultRolloverStrategy max="10"/>
+        </RollingFile>
+    </Appenders>
+
+    <Loggers>
+        <!-- Silence the benign reactor dropped-error AT THE SOURCE (covers every appender,
+             including the Studio console) - it only ever logs the SSE-abandon noise here. -->
+        <AsyncLogger name="reactor.core.publisher.Operators" level="OFF"/>
+
+        <!-- Mule framework defaults (quiet the chatty ones). -->
+        <AsyncLogger name="org.mule.service.http" level="WARN"/>
+        <AsyncLogger name="org.mule.extension.http" level="WARN"/>
+        <AsyncLogger name="com.mulesoft.mule.runtime" level="WARN"/>
+        <AsyncLogger name="org.mule.runtime.core.internal.processor.LoggerMessageProcessor" level="INFO"/>
+
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="file"/>
+        </AsyncRoot>
+    </Loggers>
+
+</Configuration>

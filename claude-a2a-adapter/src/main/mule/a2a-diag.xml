@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:tls="http://www.mulesoft.org/schema/mule/tls"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/tls http://www.mulesoft.org/schema/mule/tls/current/mule-tls.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         DIAGNOSTIC (feature-flagged) — server-side fetch proxy ("call from the inside").
+
+         Purpose: the wrapper runs INSIDE the CloudHub private space, so it can
+         reach the internal-only ingress/egress gateway addresses that a browser
+         (or an external curl) cannot. This endpoint lets us drive a request from
+         inside the VPC but trigger it from outside (browser address bar or curl),
+         and returns the upstream status/headers/body verbatim — so we can SEE what
+         the agent-network egress endpoint actually returns (real A2A JSON vs the
+         SPA's HTML), the crux of the broker->wrapper routing debug.
+
+         Drive it:
+           GET  /diag/fetch?url=<urlencoded https cloudhub.io url>
+           POST /diag/fetch?url=<urlencoded url>&method=POST   (body is forwarded)
+         e.g. (browser address bar, GET):
+           https://<wrapper>/diag/fetch?url=https%3A%2F%2Fagent-network-egress-gw-...internal-...cloudhub.io%2F<basepath>%2Fclaude-agent%2FClaudeAgentConnection%2F.well-known%2Fagent-card.json
+
+         ENABLE/DISABLE — both the endpoint AND its DIAG logging are gated by the
+         `diag.enabled` property (config/env/<env>.yaml; default true in local,
+         false in prod). When false the endpoint returns 404 and does NOTHING
+         (no outbound fetch, no logging). To turn it on/off without a code change,
+         flip `diag.enabled` (e.g. a CloudHub Runtime Manager property) and restart.
+
+         SAFETY: this is an SSRF-shaped tool (restricted to *.cloudhub.io hosts).
+         Keep it `diag.enabled: "false"` in any real/exposed environment; flip to
+         "true" only while actively debugging. To remove entirely, delete this file.
+         ===================================================================== -->
+
+    <!-- Outbound requester used for the passthrough. host/port are a reachable
+         dummy (overridden per-request by the full `url` attribute); insecure TLS
+         so an internal/self-signed gateway cert doesn't mask the actual result. -->
+    <http:request-config name="Diag_Request_config" doc:name="Diag passthrough requester">
+        <http:request-connection protocol="HTTPS" host="api.anthropic.com" port="443">
+            <tls:context>
+                <tls:trust-store insecure="true"/>
+            </tls:context>
+        </http:request-connection>
+    </http:request-config>
+
+    <flow name="diag-fetch" doc:name="Diagnostic server-side fetch">
+        <http:listener config-ref="HTTP_Listener_config" path="/diag/fetch" allowedMethods="GET,POST" doc:name="GET|POST /diag/fetch">
+            <http:response statusCode="#[vars.respStatus default 200]">
+                <http:headers><![CDATA[#[output application/java --- {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'}]]]></http:headers>
+            </http:response>
+            <http:error-response statusCode="502">
+                <http:body><![CDATA[#[output application/json --- { ok: false, error: (error.description default 'diag request failed'), requestedUrl: (vars.targetUrl default null) }]]]></http:body>
+                <http:headers><![CDATA[#[output application/java --- {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'}]]]></http:headers>
+            </http:error-response>
+        </http:listener>
+
+        <!-- Feature flag: the whole diagnostic (fetch + DIAG logging) is gated here.
+             diag.enabled != "true"  ->  404, no outbound fetch, no logging. -->
+        <choice doc:name="diag enabled?">
+          <when expression="#[(p('diag.enabled') default 'false') == 'true']">
+
+        <!-- Capture the incoming body (for POST passthrough) and parse/validate the target. -->
+        <ee:transform doc:name="parse + validate target">
+            <ee:variables>
+                <ee:set-variable variableName="targetUrl"><![CDATA[%dw 2.0
+output application/java
+---
+(attributes.queryParams.url default '')]]></ee:set-variable>
+                <ee:set-variable variableName="targetMethod"><![CDATA[%dw 2.0
+output application/java
+---
+(attributes.queryParams.method default attributes.method)]]></ee:set-variable>
+                <ee:set-variable variableName="targetHost"><![CDATA[%dw 2.0
+output application/java
+var stripped = (attributes.queryParams.url default '') replace /^[A-Za-z]+:\/\// with ''
+var authority = (stripped splitBy '/')[0] default ''
+---
+(authority splitBy ':')[0] default '']]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <logger level="INFO" category="DIAG" doc:name="log inbound"
+                message="#[output text/plain --- 'DIAG &gt;&gt; inbound method=' ++ (vars.targetMethod default '') ++ ' host=' ++ (vars.targetHost default '') ++ ' url=' ++ (vars.targetUrl default '') ++ ' reqBody=' ++ (if (payload is String) payload else if ((payload is Object) or (payload is Array)) write(payload, 'application/json') else ((payload default '') as String))]"/>
+
+        <choice doc:name="valid + allowed target?">
+            <when expression="#[(vars.targetUrl == '') or (not (vars.targetHost endsWith 'cloudhub.io'))]">
+                <ee:transform doc:name="reject">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    ok: false,
+    error: if (vars.targetUrl == '') "missing ?url= query parameter"
+           else ("host not allowed - this diagnostic only fetches *.cloudhub.io (got host: '" ++ vars.targetHost ++ "')"),
+    hint: "GET /diag/fetch?url=<urlencoded https cloudhub.io url>[&method=GET|POST]"
+}]]></ee:set-payload>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="respStatus"><![CDATA[#[400]]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <http:request config-ref="Diag_Request_config" method="#[vars.targetMethod]" url="#[vars.targetUrl]" doc:name="fetch from inside the VPC">
+                    <http:body><![CDATA[#[payload]]]></http:body>
+                    <http:headers><![CDATA[#[output application/java --- {'Content-Type': (attributes.headers['content-type'] default 'application/json'), 'Accept': '*/*'}]]]></http:headers>
+                    <http:response-validator>
+                        <http:success-status-code-validator values="100..599"/>
+                    </http:response-validator>
+                </http:request>
+                <!-- Capture upstream status/headers/body into vars (body as text regardless of
+                     content-type: JSON parsed-to-Object is re-serialized, text/html stays a String,
+                     else decoded as bytes) so we can BOTH log it and return it. -->
+                <ee:transform doc:name="capture upstream">
+                    <ee:variables>
+                        <ee:set-variable variableName="upStatus"><![CDATA[#[attributes.statusCode]]]></ee:set-variable>
+                        <ee:set-variable variableName="upReason"><![CDATA[#[attributes.reasonPhrase]]]></ee:set-variable>
+                        <ee:set-variable variableName="upContentType"><![CDATA[#[output application/java --- (attributes.headers['content-type'] default '')]]]></ee:set-variable>
+                        <ee:set-variable variableName="upHeaders"><![CDATA[#[attributes.headers]]]></ee:set-variable>
+                        <ee:set-variable variableName="upBodyText"><![CDATA[%dw 2.0
+output application/java
+---
+if (payload is String) payload
+else if ((payload is Object) or (payload is Array)) write(payload, 'application/json')
+else if (payload is Binary) (payload as String {encoding: 'UTF-8'})
+else ((payload default '') as String)]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+                <logger level="INFO" category="DIAG" doc:name="log upstream"
+                        message="#[output text/plain --- 'DIAG &lt;&lt; upstream status=' ++ (vars.upStatus as String) ++ ' ctype=' ++ (vars.upContentType default '') ++ ' len=' ++ (sizeOf(vars.upBodyText default '') as String) ++ ' body=' ++ (vars.upBodyText default '')]"/>
+                <ee:transform doc:name="shape upstream response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var bodyText = vars.upBodyText default ''
+---
+{
+    ok: true,
+    requestedUrl: vars.targetUrl,
+    method: vars.targetMethod,
+    upstreamStatus: vars.upStatus,
+    upstreamReason: vars.upReason,
+    upstreamContentType: (if ((vars.upContentType default '') == '') null else vars.upContentType),
+    upstreamHeaders: vars.upHeaders,
+    bodyLength: sizeOf(bodyText),
+    bodyPreview: if (sizeOf(bodyText) > 4000) (bodyText[0 to 3999] ++ "...[truncated]") else bodyText
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+
+          </when>
+          <otherwise>
+            <!-- Diagnostic disabled (diag.enabled != "true"): 404, do nothing. -->
+            <ee:transform doc:name="diag disabled">
+                <ee:message>
+                    <ee:set-payload><![CDATA[#[output application/json --- { ok: false, error: "diagnostic disabled (set diag.enabled=true to enable)" }]]]></ee:set-payload>
+                </ee:message>
+                <ee:variables>
+                    <ee:set-variable variableName="respStatus"><![CDATA[#[404]]]></ee:set-variable>
+                </ee:variables>
+            </ee:transform>
+          </otherwise>
+        </choice>
+    </flow>
+
+</mule>

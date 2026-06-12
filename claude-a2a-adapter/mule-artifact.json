@@ -1,0 +1,5 @@
+{
+    "minMuleVersion": "4.11.0",
+    "javaSpecificationVersions": ["17"],
+    "secureProperties": ["claude.apiKey"]
+}

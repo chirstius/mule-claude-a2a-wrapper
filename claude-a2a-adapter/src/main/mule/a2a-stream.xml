@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         STREAMING path: A2A message/stream. Same create-or-resume + poll as the
+         blocking flow, but emits interim updates over SSE via update-task-status,
+         RELAYING each new agent.tool_use as a `working` status (DESIGN §7 relay).
+         Final answer goes out as update-task-artifact + a terminal completed status.
+         NOTE (uncharted): status-content/artifact-content are plain #[{...}] objects
+         (Java), matching the connector example — no `output` directive on those.
+         ===================================================================== -->
+    <flow name="a2a-message-stream" doc:name="A2A message/stream (relay)">
+        <a2a:task-stream-listener doc:name="On Task Stream" config-ref="A2A_Server_config"/>
+
+        <!-- Stream listener exposes the connector's task id / contextId on ATTRIBUTES (not payload).
+             payload is just { message: {...} }. -->
+        <set-variable variableName="taskId" doc:name="taskId"
+            value="#[output application/java --- attributes.taskId default uuid()]"/>
+        <set-variable variableName="contextId" doc:name="contextId"
+            value="#[output application/java --- (attributes.contextId default ('ctx-' ++ vars.taskId))]"/>
+        <set-variable variableName="userPrompt" doc:name="userPrompt"
+            value="#[output application/java --- ((payload.message.parts default []) filter ((p) -> ((p.kind default p.'type') default '') == 'text') map ((p) -> (p.text default '')) joinBy '\n')]"/>
+        <!-- A tool-confirmation-response DataPart (caller answering a prior input-required). -->
+        <set-variable variableName="confirmResponse" doc:name="confirmResponse (if any)"
+            value="#[output application/java --- (((payload.message.parts default []) filter ((p) -> ((p.kind default '') == 'data') and (((p.data.'type') default '') == 'tool-confirmation-response')) map ((p) -> p.data))[0])]"/>
+        <!-- DIAG (gated by diag.enabled): capture exactly what the broker sends on a continuation. -->
+        <choice doc:name="diag inbound?">
+            <when expression="#[(p('diag.enabled') default 'false') == 'true']">
+                <logger level="INFO" doc:name="DIAG inbound (stream)"
+                    message="#[output application/json --- { tag: 'DIAG-INBOUND', src: 'message/stream', attr: { taskId: (attributes.taskId default null), contextId: (attributes.contextId default null) }, msg: { taskId: (payload.message.taskId default null), contextId: (payload.message.contextId default null), referenceTaskIds: (payload.message.referenceTaskIds default null), parts: (payload.message.parts default null) } }]"/>
+            </when>
+        </choice>
+
+        <!-- Load any paused confirmation state (dual-key: taskId then contextId; see a2a-taskstate.xml). -->
+        <flow-ref name="taskstate-load" doc:name="load task state"/>
+
+        <try doc:name="run + relay">
+            <!-- Interim update: task accepted. -->
+            <a2a:update-task-status config-ref="A2A_Server_config" doc:name="working: accepted">
+                <a2a:status-content><![CDATA[#[output application/json ---
+{
+                    taskId: vars.taskId,
+                    contextId: vars.contextId,
+                    kind: "status-update",
+                    status: { state: "working", message: { kind: "message", role: "agent", messageId: uuid(), parts: [ { kind: "text", text: "Task accepted; contacting agent." } ] } },
+                    final: false
+                }]]]></a2a:status-content>
+            </a2a:update-task-status>
+
+            <!-- Decide: HITL continuation (resume paused session) vs a fresh turn.
+                 Pending state exists => this inbound message IS the HITL answer (text or DataPart). -->
+            <choice doc:name="continuation or new turn?">
+                <when expression="#[vars.taskRec is Object]">
+                    <flow-ref name="taskstate-resume-prime" doc:name="resume paused session"/>
+                </when>
+                <otherwise>
+                    <set-variable variableName="turnAction" doc:name="turnAction=message" value="#['message']"/>
+                </otherwise>
+            </choice>
+
+            <!-- Run the turn via the shared engine: relays each tool use live and leaves the
+                 answer in vars.finalText (and file writes in vars.fileArtifacts). -->
+            <set-variable variableName="streamMode" doc:name="streamMode" value="#[true]"/>
+            <flow-ref name="claude-run-turn" doc:name="run turn (consume SSE)"/>
+
+            <!-- Branch on engine outcome: input-required (HITL) closes the stream awaiting the
+                 caller's answer; completed emits the answer artifact + terminal status. -->
+            <choice doc:name="outcome?">
+                <when expression="#[(vars.outcome default 'completed') == 'input-required']">
+                    <!-- Persist pending state (dual-key: taskId + contextId) so the caller's answer correlates back. -->
+                    <flow-ref name="taskstate-save" doc:name="save pending state"/>
+                    <a2a:update-task-status config-ref="A2A_Server_config" doc:name="input-required (final)">
+                        <a2a:status-content><![CDATA[#[output application/json ---
+{
+                    taskId: vars.taskId,
+                    contextId: vars.contextId,
+                    kind: "status-update",
+                    status: {
+                        state: "input-required",
+                        message: {
+                            kind: "message", role: "agent", messageId: uuid(),
+                            parts: [
+                                { kind: "text", text: ("Approval required before the agent can run: " ++ (((vars.pendingTools default []) map ((t) -> ((t.name default "tool") ++ (if ((t.'input'.file_path?)) (" -> " ++ t.'input'.file_path) else "")))) joinBy ", ") ++ ". Reply \"approve\" to allow, or \"deny\" to reject. (Programmatic clients may send a tool-confirmation-response DataPart for per-tool decisions.)") },
+                                { kind: "data", data: {
+                                    "type": "tool-confirmation-request",
+                                    taskId: vars.taskId,
+                                    calls: ((vars.pendingTools default []) map ((t) -> { toolUseId: t.toolUseId, name: (t.name default ""), toolType: (t.'type' default "agent.tool_use"), key: (t.key default ""), "input": (t.'input' default {}) }))
+                                } }
+                            ]
+                        }
+                    },
+                    final: true
+                }]]]></a2a:status-content>
+                    </a2a:update-task-status>
+                </when>
+                <otherwise>
+                    <!-- Completed: clear any pending state (no-op if none), emit answer artifact + terminal status. -->
+                    <flow-ref name="taskstate-clear" doc:name="clear pending state"/>
+                    <a2a:update-task-artifact config-ref="A2A_Server_config" doc:name="answer artifact">
+                        <a2a:artifact-content><![CDATA[#[output application/json ---
+{
+                    taskId: vars.taskId,
+                    contextId: vars.contextId,
+                    kind: "artifact-update",
+                    artifact: { artifactId: ("answer-" ++ vars.taskId), name: "Answer", parts: [ { kind: "text", text: vars.finalText } ] }
+                }]]]></a2a:artifact-content>
+                    </a2a:update-task-artifact>
+
+                    <!-- Emit each written file as its own artifact (deduped to last write per path).
+                         Includes files written this turn (vars.fileArtifacts) PLUS any APPROVED writes
+                         that were gated last turn: a HITL-approved write's tool_use (with file content)
+                         fired before the pause, so it's not in this turn's stream - recover it from the
+                         persisted pending state (taskRec.pending) for tools the caller decided 'allow'. -->
+                    <set-variable variableName="outFiles" doc:name="dedupe file writes"
+                        value="#[output application/java ---
+do {
+    var approvedPending = ((if (vars.taskRec is Object) (vars.taskRec.pending default []) else [])
+        filter ((t) -> (t.'input'.file_path?)
+            and ((sizeOf((vars.confirmEvents default []) filter ((d) -> (d.tool_use_id == t.toolUseId) and ((d.result default '') == 'allow')))) > 0))
+        map ((t) -> { path: (t.'input'.file_path), content: (t.'input'.content default '') }))
+    ---
+    (((vars.fileArtifacts default []) ++ approvedPending) groupBy ((f) -> f.path) pluck ((touches, path) -> { path: path, content: (touches[-1].content default '') }))
+}]"/>
+                    <foreach collection="#[vars.outFiles]" doc:name="for each file artifact">
+                        <a2a:update-task-artifact config-ref="A2A_Server_config" doc:name="file artifact">
+                            <a2a:artifact-content><![CDATA[#[output application/json ---
+do {
+    var base = ((payload.path default "artifact") splitBy "/")[-1] default "artifact"
+    ---
+    {
+        taskId: vars.taskId,
+        contextId: vars.contextId,
+        kind: "artifact-update",
+        artifact: { artifactId: base, name: base, parts: [ { kind: "text", text: (payload.content default "") } ] }
+    }
+}]]]></a2a:artifact-content>
+                        </a2a:update-task-artifact>
+                    </foreach>
+
+                    <a2a:update-task-status config-ref="A2A_Server_config" doc:name="completed (final)">
+                        <a2a:status-content><![CDATA[#[output application/json ---
+{
+                    taskId: vars.taskId,
+                    contextId: vars.contextId,
+                    kind: "status-update",
+                    status: {
+                        state: "completed",
+                        message: { kind: "message", role: "agent", messageId: uuid(), parts: [
+                            { kind: "data", data: { "type": "run-summary", usage: vars.usage } }
+                        ] }
+                    },
+                    final: true
+                }]]]></a2a:status-content>
+                    </a2a:update-task-status>
+                </otherwise>
+            </choice>
+
+            <error-handler>
+                <on-error-continue type="ANY" doc:name="-> failed (stream)">
+                    <logger level="ERROR" doc:name="log stream error"
+                        message="#[output application/java --- ('A2A_STREAM_ERROR: ' ++ (error.errorType.identifier default '') ++ ' :: ' ++ (error.description default 'none'))]"/>
+                    <a2a:update-task-status config-ref="A2A_Server_config" doc:name="failed (final)">
+                        <a2a:status-content><![CDATA[#[output application/json ---
+{
+                            taskId: vars.taskId,
+                            contextId: vars.contextId,
+                            kind: "status-update",
+                            status: { state: "failed", message: { kind: "message", role: "agent", messageId: uuid(), parts: [ { kind: "text", text: ("Error: " ++ (error.description default "unknown")) } ] } },
+                            final: true
+                        }]]]></a2a:status-content>
+                    </a2a:update-task-status>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <!-- =====================================================================
+         SHARED turn engine (used by both blocking message/send and streaming
+         message/stream, for BOTH the first turn and a HITL continuation).
+         Caller sets first: vars.taskId / contextId / userPrompt / streamMode and
+           vars.turnAction = 'message'  (default) -> send user.message, OR
+           vars.turnAction = 'confirm'           -> caller has set vars.sessionId
+                 and vars.confirmEvents; we send those tool confirmations instead
+                 of a new message (resuming a paused session).
+         Resolves-or-creates the session (skipped for 'confirm'), primes it, then
+         consumes Claude's live SSE event stream (send-then-open + lazy iterator;
+         see DESIGN sec 13). Tool calls gated by the agent's always_ask policy make
+         the session pause (session.status_idle / requires_action); we apply the
+         confirmation.{default,allow,deny} policy: auto allow/deny are sent inline
+         and the SAME open stream resumes; any 'defer' breaks to input-required.
+         Outputs:
+           vars.outcome        - 'completed' | 'input-required'
+           vars.finalText      - the agent's answer text (completed)
+           vars.fileArtifacts  - [ { path, content } ] for files the agent wrote
+           vars.pendingTools   - [ { toolUseId, name, type, key, input } ] (input-required)
+         When vars.streamMode == true it ALSO relays each tool use as an interim
+         update-task-status (SSE). When false it just aggregates (blocking).
+         ===================================================================== -->
+    <sub-flow name="claude-run-turn" doc:name="claude-run-turn">
+        <!-- Resolve/create the session, UNLESS this is a confirmation continuation
+             (caller already supplied vars.sessionId for the paused session). -->
+        <choice doc:name="resolve session?">
+            <when expression="#[(vars.turnAction default 'message') != 'confirm']">
+                <os:retrieve key="#[vars.contextId]" objectStore="contextToSession" target="sessionId" doc:name="lookup session">
+                    <os:default-value>#['__NEW__']</os:default-value>
+                </os:retrieve>
+                <choice doc:name="new context?">
+                    <when expression="#[vars.sessionId == '__NEW__']">
+                        <flow-ref name="claude-create-session" doc:name="create session"/>
+                        <os:store key="#[vars.contextId]" objectStore="contextToSession" doc:name="save mapping">
+                            <os:value>#[vars.sessionId]</os:value>
+                        </os:store>
+                    </when>
+                </choice>
+            </when>
+        </choice>
+
+        <!-- Map taskId -> sessionId so the authorization-listener can resolve a tasks/cancel
+             (which carries only the taskId) to this session and send user.interrupt. -->
+        <os:store key="#[vars.taskId]" objectStore="taskToSession" doc:name="map task-&gt;session">
+            <os:value>#[vars.sessionId]</os:value>
+        </os:store>
+
+        <set-variable variableName="finalText" doc:name="finalText init" value="#['']"/>
+        <set-variable variableName="fileArtifacts" doc:name="fileArtifacts init" value="#[output application/java --- []]"/>
+        <set-variable variableName="toolUses" doc:name="toolUses init" value="#[output application/java --- (if ((vars.turnAction default 'message') == 'confirm') (vars.taskRec.toolUses default {}) else {})]"/>
+        <set-variable variableName="pendingTools" doc:name="pendingTools init" value="#[output application/java --- []]"/>
+        <set-variable variableName="outcome" doc:name="outcome init" value="#['completed']"/>
+        <!-- Token usage accumulator (summed across span.model_request_end events this turn). -->
+        <set-variable variableName="usage" doc:name="usage init"
+            value="#[output application/java --- { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, model_requests: 0 }]"/>
+
+        <!-- Prime the session: new message, OR resume by sending tool confirmations. -->
+        <choice doc:name="prime session">
+            <when expression="#[(vars.turnAction default 'message') == 'confirm']">
+                <flow-ref name="claude-send-confirmations" doc:name="send confirmations (resume)"/>
+            </when>
+            <otherwise>
+                <flow-ref name="claude-send-message" doc:name="send user.message"/>
+            </otherwise>
+        </choice>
+
+        <!-- open immediately before foreach (buffer). -->
+        <flow-ref name="claude-open-event-stream" doc:name="open Claude SSE"/>
+        <set-variable variableName="eventStream" doc:name="eventStream" value="#[payload]"/>
+
+        <try doc:name="consume SSE">
+            <foreach collection="#[vars.eventStream]" doc:name="for each SSE event">
+                <set-variable variableName="ce" doc:name="parse event"
+                    value="#[output application/java --- read((payload.data default '{}'), 'application/json')]"/>
+                <choice doc:name="route event">
+                    <when expression="#[(vars.ce.'type' default '') == 'agent.tool_use' or (vars.ce.'type' default '') == 'agent.mcp_tool_use']">
+                        <!-- Record by event id so a later requires_action can look up name/input. -->
+                        <set-variable variableName="toolUses" doc:name="record tool_use"
+                            value="#[output application/java --- ((vars.toolUses default {}) ++ { (vars.ce.id): vars.ce })]"/>
+                        <choice doc:name="file write?">
+                            <when expression="#[vars.ce.'input'.file_path?]">
+                                <set-variable variableName="fileArtifacts" doc:name="add file artifact"
+                                    value="#[output application/java --- ((vars.fileArtifacts default []) ++ [{ path: (vars.ce.'input'.file_path), content: (vars.ce.'input'.content default '') }])]"/>
+                            </when>
+                        </choice>
+                        <choice doc:name="relay?">
+                            <when expression="#[vars.streamMode default false]">
+                                <a2a:update-task-status config-ref="A2A_Server_config" doc:name="working: tool">
+                                    <a2a:status-content><![CDATA[#[output application/json ---
+{
+    taskId: vars.taskId,
+    contextId: vars.contextId,
+    kind: "status-update",
+    status: { state: "working", message: { kind: "message", role: "agent", messageId: uuid(), parts: [ { kind: "text", text: ("Using tool: " ++ (vars.ce.name default 'tool') ++ (if (vars.ce.'input'.file_path?) (' -> ' ++ vars.ce.'input'.file_path) else '')) } ] } },
+    final: false
+}]]]></a2a:status-content>
+                                </a2a:update-task-status>
+                            </when>
+                        </choice>
+                    </when>
+                    <when expression="#[(vars.ce.'type' default '') == 'agent.message']">
+                        <set-variable variableName="finalText" doc:name="capture answer"
+                            value="#[output application/java --- ((vars.ce.content default []) filter ((b) -> b.'type' == 'text') map ((b) -> (b.text default '')) joinBy '\n')]"/>
+                    </when>
+                    <!-- Agent is reasoning (contentless marker) - relay a live "thinking" update. -->
+                    <when expression="#[((vars.ce.'type' default '') == 'agent.thinking') and (vars.streamMode default false)]">
+                        <a2a:update-task-status config-ref="A2A_Server_config" doc:name="working: thinking">
+                            <a2a:status-content><![CDATA[#[output application/json ---
+{
+    taskId: vars.taskId,
+    contextId: vars.contextId,
+    kind: "status-update",
+    status: { state: "working", message: { kind: "message", role: "agent", messageId: uuid(), parts: [ { kind: "text", text: "Thinking…" } ] } },
+    final: false
+}]]]></a2a:status-content>
+                        </a2a:update-task-status>
+                    </when>
+                    <!-- A tool finished - relay its result snippet. -->
+                    <when expression="#[((vars.ce.'type' default '') == 'agent.tool_result') and (vars.streamMode default false)]">
+                        <a2a:update-task-status config-ref="A2A_Server_config" doc:name="working: tool result">
+                            <a2a:status-content><![CDATA[#[output application/json ---
+do {
+    var txt = ((vars.ce.content default []) filter ((b) -> (b.'type' default '') == 'text') map ((b) -> (b.text default '')) joinBy ' ')
+    ---
+    {
+        taskId: vars.taskId,
+        contextId: vars.contextId,
+        kind: "status-update",
+        status: { state: "working", message: { kind: "message", role: "agent", messageId: uuid(), parts: [ { kind: "text", text: ("Tool result: " ++ txt) } ] } },
+        final: false
+    }
+}]]]></a2a:status-content>
+                        </a2a:update-task-status>
+                    </when>
+                    <!-- Accumulate token usage (emitted on completion); runs in both stream + blocking. -->
+                    <when expression="#[(vars.ce.'type' default '') == 'span.model_request_end']">
+                        <set-variable variableName="usage" doc:name="accumulate usage"
+                            value="#[output application/java ---
+do {
+    var mu = vars.ce.model_usage default {}
+    ---
+    {
+        input_tokens: ((vars.usage.input_tokens default 0) + (mu.input_tokens default 0)),
+        output_tokens: ((vars.usage.output_tokens default 0) + (mu.output_tokens default 0)),
+        cache_creation_input_tokens: ((vars.usage.cache_creation_input_tokens default 0) + (mu.cache_creation_input_tokens default 0)),
+        cache_read_input_tokens: ((vars.usage.cache_read_input_tokens default 0) + (mu.cache_read_input_tokens default 0)),
+        model_requests: ((vars.usage.model_requests default 0) + 1)
+    }
+}]"/>
+                    </when>
+                    <!-- PAUSE: a gated tool needs confirmation. Resolve via policy. -->
+                    <when expression="#[((vars.ce.'type' default '') == 'session.status_idle') and ((vars.ce.stop_reason.'type' default '') == 'requires_action')]">
+                        <!-- Build candidates from the blocking event ids + recorded tool_use details. -->
+                        <set-variable variableName="pendingCandidates" doc:name="pending candidates"
+                            value="#[output application/java ---
+((vars.ce.stop_reason.event_ids default []) map ((eid) -> do {
+    var tu = (vars.toolUses default {})[eid]
+    ---
+    { toolUseId: eid, 'type': (tu.'type' default 'agent.tool_use'), name: (tu.name default ''), server: (tu.mcp_server_name default tu.server default '_'), 'input': (tu.'input' default {}) }
+}))]"/>
+                        <flow-ref name="claude-confirm-resolve" doc:name="apply policy"/>
+
+                        <!-- Surface the SILENT policy decisions (auto allow/deny) as events so the
+                             caller sees what the wrapper decided on their behalf and why. Deferred
+                             (HITL) tools are surfaced separately as input-required, so skip them here. -->
+                        <choice doc:name="auto-decisions to surface?">
+                            <when expression="#[(vars.streamMode default false) and ((sizeOf ((vars.resolved default []) filter ((r) -> (r.decision default '') != 'defer'))) > 0)]">
+                                <a2a:update-task-status config-ref="A2A_Server_config" doc:name="working: policy decision">
+                                    <a2a:status-content><![CDATA[#[output application/json ---
+do {
+    var autos = (vars.resolved default []) filter ((r) -> (r.decision default '') != 'defer')
+    fun tgt(r) = do {
+        var inp = (vars.toolUses default {})[r.toolUseId].'input' default {}
+        ---
+        if (inp.file_path?) (" -> " ++ inp.file_path)
+        else if (inp.command?) (" -> " ++ inp.command)
+        else ""
+    }
+    fun line(r) =
+        (if ((r.decision default '') == 'allow') "✓ Auto-approved " else "✕ Auto-denied ")
+        ++ "tool " ++ (r.name default 'tool') ++ tgt(r)
+        ++ " — by rule '" ++ (r.reasonRule default '?') ++ "' (" ++ (r.reasonSource default 'policy') ++ ")"
+    ---
+    {
+        taskId: vars.taskId,
+        contextId: vars.contextId,
+        kind: "status-update",
+        status: { state: "working", message: { kind: "message", role: "agent", messageId: uuid(), parts: [ { kind: "text", text: ((autos map ((r) -> line(r))) joinBy "\n") } ] } },
+        final: false
+    }
+}]]]></a2a:status-content>
+                                </a2a:update-task-status>
+                            </when>
+                        </choice>
+
+                        <!-- Compute the auto allow/deny confirmations AND the deferred (HITL) tools. -->
+                        <set-variable variableName="confirmEvents" doc:name="auto confirmations"
+                            value="#[output application/java ---
+((vars.resolved default []) filter ((r) -> r.decision == 'allow' or r.decision == 'deny')
+   map ((r) -> { tool_use_id: r.toolUseId, result: r.decision }
+        ++ (if (r.decision == 'deny') { denyMessage: ('Denied by wrapper policy (' ++ r.key ++ ')') } else {})))]"/>
+                        <set-variable variableName="pendingTools" doc:name="deferred tools"
+                            value="#[output application/java ---
+((vars.resolved default []) filter ((r) -> r.decision == 'defer')
+   map ((r) -> { toolUseId: r.toolUseId, name: r.name, 'type': r.'type', key: r.key, 'input': ((vars.toolUses default {})[r.toolUseId].'input' default {}) }))]"/>
+                        <choice doc:name="any deferred?">
+                            <when expression="#[(sizeOf (vars.pendingTools default [])) > 0]">
+                                <!-- HITL: do NOT send the auto confirmations now. The whole requires_action
+                                     batch (auto allow/deny in vars.confirmEvents + the deferred tools) is
+                                     carried to the pending state; on resume we send ALL confirmations
+                                     together so the managed-agent session gets the complete set at once and
+                                     doesn't re-emit a partial requires_action (which caused the multi-approve
+                                     loop). -->
+                                <set-variable variableName="outcome" doc:name="outcome=input-required" value="#['input-required']"/>
+                                <raise-error type="APP:NEEDS_INPUT" description="awaiting tool confirmation" doc:name="defer -> break"/>
+                            </when>
+                            <otherwise>
+                                <!-- No deferred tools: send the auto confirmations now and keep consuming. -->
+                                <choice doc:name="any auto-decisions?">
+                                    <when expression="#[(sizeOf (vars.confirmEvents default [])) > 0]">
+                                        <flow-ref name="claude-send-confirmations" doc:name="send auto-confirmations"/>
+                                    </when>
+                                </choice>
+                            </otherwise>
+                        </choice>
+                    </when>
+                    <!-- DONE: any terminal idle (end_turn, OR an interrupt from tasks/cancel, which
+                         may arrive with no stop_reason). requires_action is handled above, so reaching
+                         here means the turn is over - break regardless of stop_reason so a cancel can't
+                         leave the SSE consume hanging. -->
+                    <when expression="#[(vars.ce.'type' default '') == 'session.status_idle']">
+                        <raise-error type="APP:STREAM_DONE" description="end of turn" doc:name="idle -> break"/>
+                    </when>
+                </choice>
+            </foreach>
+            <error-handler>
+                <on-error-continue type="APP:STREAM_DONE" logException="false" doc:name="end of turn (normal break)"/>
+                <on-error-continue type="APP:NEEDS_INPUT" logException="false" doc:name="input-required (normal break)"/>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+</mule>

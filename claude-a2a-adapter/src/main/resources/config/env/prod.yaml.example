@@ -1,0 +1,39 @@
+# =============================================================================
+# Claude A2A Wrapper - PROD environment overrides.  Selected when env=prod
+# (deploy with -M-Denv=prod).
+#
+# Non-secret properties only - secrets live in config/secure/prod.yaml.
+#
+# TEMPLATE: copy this file to config/env/prod.yaml (which is gitignored) and fill
+# in your production values.
+# =============================================================================
+
+claude:
+  # Backend coordinates (from the Console / claude-agent/ids.json).
+  agentId: "agent_REPLACE_WITH_PROD_AGENT"
+  environmentId: "env_REPLACE_WITH_PROD_ENVIRONMENT"
+  # agentVersion: "1" # optional - specify to pin an agent version (omit = latest)
+
+a2a:
+  server:
+    listener:
+      host: "0.0.0.0"
+      # Behind a Flex Gateway / load balancer, set the public hop's read timeout to
+      # cover a whole turn (see docs/USAGE.md "Timeouts").
+      port: "8081"
+
+confirmation:
+  # Determines the tool confirmation action taken when the upstream agent surfaces
+  # a tool usage confirmation request, and no global allow/deny-list entries apply.
+  # POSSIBLE VALUES:
+  #   defer = surface to the A2A caller as `input-required` (protocol-native HITL) and let caller decide
+  #   allow = auto-approve confirmation, never surface to caller
+  #   deny  = auto-reject confirmation, never surface to caller
+  default: "defer"
+
+diag:
+  # Feature flag for the server-side fetch diagnostic (/diag/fetch) and its DIAG
+  # logging (see src/main/mule/a2a-diag.xml). KEEP THIS "false" in prod — it is an
+  # SSRF-shaped probe. Flip to "true" only while actively debugging a routing issue
+  # (e.g. via a CloudHub Runtime Manager property override), then flip back to "false".
+  enabled: "false"

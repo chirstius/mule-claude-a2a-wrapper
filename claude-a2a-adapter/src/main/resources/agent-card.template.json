@@ -1,0 +1,40 @@
+{
+  "protocolVersion": "0.3.0",
+  "name": "Claude Managed Agent (A2A)",
+  "description": "A Claude managed agent exposed over A2A by a MuleSoft wrapper. Runs general-purpose tasks in an isolated cloud sandbox and returns results as A2A artifacts. Multi-turn conversations are preserved via A2A contextId.",
+  "url": "${a2a.server.cardUrl}",
+  "version": "0.1.0",
+  "provider": {
+    "organization": "Hirstius Inc.",
+    "url": "https://example.com"
+  },
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": false,
+    "extensions": [
+      {
+        "uri": "https://anypoint-poc.example.com/a2a/ext/tool-confirmation/v1",
+        "description": "When the wrapped agent pauses for tool approval and the wrapper is configured to defer, the task enters 'input-required' carrying a DataPart {kind:'tool-confirmation-request', pending:[{toolUseId,toolType,name,server?,input}]}. Answer by sending a message on the same taskId/contextId with a DataPart {kind:'tool-confirmation-response', decisions:[{toolUseId, result:'allow'|'deny', denyMessage?}]}.",
+        "required": false
+      }
+    ]
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain", "text/markdown"],
+  "skills": [
+    {
+      "id": "general-task",
+      "name": "General task execution",
+      "description": "Carries out open-ended tasks: research, analysis, code, file generation, and data wrangling, using a sandboxed toolset (file I/O, shell, web). Returns produced files as artifacts.",
+      "tags": ["general", "coding", "research", "files", "automation"],
+      "examples": [
+        "Summarize the attached requirements and produce a markdown spec.",
+        "Write a Python script that parses this CSV and output the cleaned file.",
+        "Research current A2A protocol adopters and return a short report."
+      ],
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain", "text/markdown"]
+    }
+  ]
+}

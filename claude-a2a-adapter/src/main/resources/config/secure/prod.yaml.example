@@ -1,0 +1,21 @@
+# =============================================================================
+# Claude A2A Wrapper - PROD secrets
+# -----------------------------------------------------------------------------
+# A valid Claude API key must be provided via
+#    1. A launch argument: -M-Dclaude.apiKey=sk-ant-...
+#    2. A secured value below as described here:
+#       https://docs.mulesoft.com/mule-runtime/latest/secure-configuration-properties
+#    3. A Runtime Manager protected value (recommended for prod)
+#
+# The wrapper resolves the API key as
+#     p('claude.apiKey') default p('secure::claude.apiKey')
+# so the runtime property value 'wins'.
+#
+# TEMPLATE: copy this file to config/secure/prod.yaml (which is gitignored). For
+# option 2, encrypt with the MuleSoft Secure Properties Tool (AES / CBC) and deploy
+# with  -M-Denv=prod -M-Dsecure.key=<your-production-key>  . See docs/CONFIG.md for
+# the exact encryption command. Never commit config/secure/prod.yaml.
+# =============================================================================
+
+claude:
+  apiKey: "![PASTE_AES_CBC_ENCRYPTED_API_KEY_HERE]"
