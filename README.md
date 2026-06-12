@@ -23,10 +23,8 @@ A2A client / orchestrator                 Mule wrapper (this project)           
 .
 ├── README.md                     ← you are here
 ├── docs/
-│   ├── DESIGN.md                 ← full architecture, mapping tables, design decisions
 │   ├── CONFIG.md                 ← config layout, env toggle, secure properties
-│   ├── USAGE.md                  ← A2A client guide + how to run it
-│   └── STUDIO-VALIDATION.md      ← checklist for validating the beta-connector DSL in Studio
+│   └── USAGE.md                  ← A2A client guide + how to run it
 ├── claude-agent/                 ← the Claude-side backend (the testable target)
 │   ├── environment.json          ← cloud sandbox definition (declarative)
 │   ├── agent.json                ← managed agent definition (declarative)
@@ -64,22 +62,18 @@ Copy-Item .env.example .env
 `setup.ps1` reuses the environment if one with the same name already exists, but creates a **new agent**
 each run (agents aren't name-unique). Use `teardown.ps1` to clean up, or just reuse the IDs in `ids.json`.
 
-## Status / build order
+## Features
 
-1. ✅ Design captured (`docs/DESIGN.md`)
-2. ✅ Claude backend definitions + setup/smoke-test scripts
-3. ✅ A2A agent card + wrapper configuration contract
-4. ✅ Mule project skeleton + global config + Claude REST client sub-flows
-5. ✅ Backend stood up + smoke test passed; real event shapes captured in DESIGN.md
-6. ✅ Mule: blocking `message/send` orchestration (create-or-resume → poll-to-end-of-turn → A2A Task)
-7. ✅ Studio validation — DSL valid, connectors resolved, **blocking `message/send` works end-to-end** (A2A client → Mule → Claude → A2A Task with the agent's answer); **multi-turn session reuse validated** (`contextId` continuity). Findings in `docs/DESIGN.md §13`
-8. ✅ Mule: streaming `message/stream` relay — `task-stream-listener` emits live `working` updates, **per-tool-use relay over SSE**, answer artifact, and `completed` (validated end-to-end). Findings in `docs/DESIGN.md §13`
-9. ✅ Mule: confirmation resolver + `input-required` round-trip (HITL, single-approve resume); `tasks/cancel` → interrupt
-10. ✅ MCP tool-use governance (per-tool allow/deny globs + `confirmation.default`); agent card served inline via `${a2a.server.cardUrl}`
-11. ✅ End-to-end validated through a real A2A broker / multi-agent orchestrator
-12. ⚠️ Push notifications: config-listener + card flag present; one integration gap remains (see `docs/PUSH-NOTIFICATIONS.md`)
+- **Blocking `message/send`** — create-or-resume → poll-to-end-of-turn → A2A Task with the agent's answer.
+- **Streaming `message/stream`** — live `working` updates, per-tool-use relay over SSE, answer artifact, `completed`.
+- **Multi-turn sessions** — `contextId → sessionId` continuity across turns.
+- **Human-in-the-loop** — tool-confirmation → A2A `input-required` with single-approve resume; `tasks/cancel` → interrupt.
+- **MCP tool-use governance** — per-tool allow/deny globs + a `confirmation.default` (`defer` / `allow` / `deny`).
+- **Inline, config-driven agent card** — served from `global.xml` via `${a2a.server.cardUrl}`.
+- **End-to-end validated** through a real A2A broker / multi-agent orchestrator.
+- ⚠️ **Push notifications** — config-listener + card flag present; one integration gap remains.
 
-## Key design rules (see DESIGN.md for the why)
+## Key design rules
 
 - **`contextId → sessionId`** is the conversation keystone; persisted in an Object Store.
 - **The terminal answer must land in durable task state** (final artifact / `completed` status message),
@@ -91,4 +85,4 @@ each run (agents aren't name-unique). Use `teardown.ps1` to clean up, or just re
   is async; a fresh session is already `idle`, so status-polling would exit early). Retry budget is config
   (`claude.poll.maxRetries` × `claude.poll.intervalMs`, ~5 min default). Our HTTP listener holds the
   connection open for the whole flow — no server-side timeout — so set the *upstream* gateway/LB/caller
-  read timeout to `(maxRetries × intervalMs) + a2a.server.callerTimeoutBufferMs`. See DESIGN.md §6.1.
+  read timeout to `(maxRetries × intervalMs) + a2a.server.callerTimeoutBufferMs`.

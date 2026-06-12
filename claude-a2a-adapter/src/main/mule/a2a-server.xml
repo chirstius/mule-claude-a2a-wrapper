@@ -13,7 +13,7 @@
 
     <!-- =====================================================================
          BLOCKING path: A2A message/send  ->  Claude session run-to-idle.
-         Maps DESIGN.md §5 (state), §6 (entry points), §7 (durable answer).
+         Covers session state, the entry points, and the durable-answer guarantee.
          ===================================================================== -->
     <flow name="a2a-message-send" doc:name="A2A message/send (blocking)">
         <a2a:task-listener doc:name="On Task" config-ref="A2A_Server_config"/>
@@ -143,7 +143,7 @@ var allFiles = ((vars.fileArtifacts default []) ++ approvedPending)
                  status.timestamp and history[]. update-task-status is streaming-only. -->
 
             <error-handler>
-                <!-- Map any failure to an A2A `failed` result (DESIGN.md §9). -->
+                <!-- Map any failure to an A2A `failed` result. -->
                 <on-error-continue type="ANY" doc:name="-> failed">
                     <logger level="ERROR" doc:name="log error"
                         message="#[output application/java --- ('A2A_ERROR_HANDLER: ' ++ (error.errorType.identifier default '') ++ ' :: ' ++ (error.description default 'none'))]"/>

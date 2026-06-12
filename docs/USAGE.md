@@ -92,8 +92,8 @@ actually stops (not just a cosmetic state change). Most useful against a streami
 ## 7. Not yet supported
 
 - **Push notifications** (webhook delivery). The connector requires a `push-notification-config-listener`
-  and the card flag, but the correct end-to-end delivery pattern isn't wired yet — see DESIGN.md
-  "Push notifications" open item. The card advertises `pushNotifications: false` accordingly.
+  and the card flag, but the correct end-to-end delivery pattern isn't wired yet. The card advertises
+  `pushNotifications: false` accordingly.
 
 ---
 
@@ -134,8 +134,7 @@ low it will sever the connection mid-turn even though the wrapper is still worki
 Use the **[`mule-headless-dev`](https://github.com/chirstius/mule-headless-dev)** skill: build with JDK 17,
 run a clean standalone Mule EE runtime, hot-deploy the jar, and exercise with the `scripts/*-test.ps1`
 (or `.sh`) harnesses (`local-test`,
-`multiturn-test`, `stream-test`, `confirm-test`, `cancel-probe`). See DESIGN.md
-"Headless / autonomous runtime — SOLVED".
+`multiturn-test`, `stream-test`, `confirm-test`, `cancel-probe`).
 
 ## Connector compatibility note (1.1.1)
 

@@ -68,5 +68,4 @@ A Vue console lives in [`../demo-ui/`](../demo-ui/). Run its `embed/embed.ps1` (
 sidecar it into this app (served at the root path). The build outputs (`src/main/resources/dist/` +
 `src/main/mule/a2a-ui.xml`) are gitignored — delete them to remove the demo.
 
-More: [../docs/DESIGN.md](../docs/DESIGN.md) (architecture) · [../docs/CONFIG.md](../docs/CONFIG.md) ·
-[../docs/USAGE.md](../docs/USAGE.md) · [../docs/STUDIO-VALIDATION.md](../docs/STUDIO-VALIDATION.md).
+More: [../docs/CONFIG.md](../docs/CONFIG.md) · [../docs/USAGE.md](../docs/USAGE.md).

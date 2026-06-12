@@ -47,3 +47,9 @@ desktop.ini
 
 # push-notification test receiver log
 webhook-received.log
+
+# Local-only docs — kept on disk (deep design notes / internal integration logs), not published.
+docs/DESIGN.md
+docs/BROKER-INTEGRATION.md
+docs/PUSH-NOTIFICATIONS.md
+docs/STUDIO-VALIDATION.md

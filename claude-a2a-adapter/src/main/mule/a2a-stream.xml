@@ -14,7 +14,7 @@
     <!-- =====================================================================
          STREAMING path: A2A message/stream. Same create-or-resume + poll as the
          blocking flow, but emits interim updates over SSE via update-task-status,
-         RELAYING each new agent.tool_use as a `working` status (DESIGN §7 relay).
+         RELAYING each new agent.tool_use as a `working` status.
          Final answer goes out as update-task-artifact + a terminal completed status.
          NOTE (uncharted): status-content/artifact-content are plain #[{...}] objects
          (Java), matching the connector example — no `output` directive on those.
@@ -193,8 +193,8 @@ do {
                  and vars.confirmEvents; we send those tool confirmations instead
                  of a new message (resuming a paused session).
          Resolves-or-creates the session (skipped for 'confirm'), primes it, then
-         consumes Claude's live SSE event stream (send-then-open + lazy iterator;
-         see DESIGN sec 13). Tool calls gated by the agent's always_ask policy make
+         consumes Claude's live SSE event stream (send-then-open + lazy iterator).
+         Tool calls gated by the agent's always_ask policy make
          the session pause (session.status_idle / requires_action); we apply the
          confirmation.{default,allow,deny} policy: auto allow/deny are sent inline
          and the SAME open stream resumes; any 'defer' breaks to input-required.

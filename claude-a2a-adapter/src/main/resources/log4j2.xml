@@ -2,8 +2,8 @@
 <!--
   App logging config (mirrors the Mule default app log4j2) with one addition: a RegexFilter
   that DENIES the benign reactor "onErrorDropped" / "Trying to write in a closed buffer" lines.
-  Those come from abandoning Claude's never-ending SSE stream at end-of-turn (see DESIGN "Open
-  items"). Measured to be a bounded, self-draining connection (~30-60s), NOT a leak, so this is
+  Those come from abandoning Claude's never-ending SSE stream at end-of-turn. Measured to be a
+  bounded, self-draining connection (~30-60s), NOT a leak, so this is
   purely cosmetic - everything else logs normally.
 -->
 <Configuration>

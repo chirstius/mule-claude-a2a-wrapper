@@ -36,5 +36,4 @@ copy those into the wrapper's `config/env/local.yaml` (see [claude-a2a-adapter](
 
 > `.env`, `.env.local`, and `ids.json` are **gitignored** — they hold your key and account-specific IDs.
 
-See the root [README](../README.md) and [docs/DESIGN.md](../docs/DESIGN.md) for how this backend maps to
-A2A Task semantics.
+See the root [README](../README.md) for how this backend maps to A2A Task semantics.
