@@ -131,8 +131,9 @@ low it will sever the connection mid-turn even though the wrapper is still worki
 
 ## Running it (no Anypoint Studio)
 
-Use the **`mule-headless-dev`** skill: build with JDK 17, run a clean standalone Mule EE runtime,
-hot-deploy the jar, and exercise with the `scripts/*-test.ps1` harnesses (`local-test`,
+Use the **[`mule-headless-dev`](https://github.com/chirstius/mule-headless-dev)** skill: build with JDK 17,
+run a clean standalone Mule EE runtime, hot-deploy the jar, and exercise with the `scripts/*-test.ps1`
+(or `.sh`) harnesses (`local-test`,
 `multiturn-test`, `stream-test`, `confirm-test`, `cancel-probe`). See DESIGN.md
 "Headless / autonomous runtime — SOLVED".
 

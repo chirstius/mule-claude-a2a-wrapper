@@ -17,7 +17,7 @@ npm run dev            # http://localhost:5173
 ```
 
 The Vite dev server **proxies `/a2a` → `http://localhost:8081`** (your local headless wrapper), so
-the browser stays same-origin and there's no CORS. Start the wrapper first (mule-headless-dev skill).
+the browser stays same-origin and there's no CORS. Start the wrapper first (see the [mule-headless-dev](https://github.com/chirstius/mule-headless-dev) skill).
 
 - **Point at a different wrapper:** either change the proxy target in `vite.config.ts`, or type an
   absolute base URL into the **endpoint** field in the header (e.g. the CloudHub URL). Note: an

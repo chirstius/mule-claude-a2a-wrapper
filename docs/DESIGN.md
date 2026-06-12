@@ -456,7 +456,7 @@ The recipe (verified end to end: clean boot, real Claude call through it, hot-re
 4. **Configure once:** `wrapper.conf` → `wrapper.ping.timeout=300` (default 30 kills a slow/contended boot via
    `DUMP,RESTART`) and `wrapper.java.additional.101=-Dclaude.apiKey=<key>` (`ignore_sequence_gaps=TRUE`, so any
    index works). Drop the app jar into `apps\`.
-5. **Run in CONSOLE mode** (`mule.bat console`), launched from a background shell (the `mule-headless-dev`
+5. **Run in CONSOLE mode** (`mule.bat console`), launched from a background shell (the [`mule-headless-dev`](https://github.com/chirstius/mule-headless-dev)
    skill's `start`). It stays up as long as the shell does. **Hot-redeploy** by copying a fresh jar into
    `apps\` (the skill's `redeploy`): the running runtime redeploys in place (~2–5 s; plugins stay cached),
    no restart.
@@ -470,7 +470,7 @@ The recipe (verified end to end: clean boot, real Claude call through it, hot-re
 - The **Windows service** path is also a dead end (admin `mule.bat install`/`start` hits the SCM ~30 s
   start-signal timeout → aborts); console mode under a background shell is the answer, no admin needed.
 
-**Helpers:** the start/redeploy dev loop is provided by the `mule-headless-dev` Claude skill (build with
+**Helpers:** the start/redeploy dev loop is provided by the [`mule-headless-dev`](https://github.com/chirstius/mule-headless-dev) Claude skill (build with
 JDK 17 → hot-deploy → wait-until-ready). The repo's `scripts/` holds the `*-test.ps1` harnesses
 (smoke / multiturn / stream / confirm / cancel) + `webhook-receiver.py`.
 Loop = edit → skill `redeploy` → run a `scripts/*-test.ps1` → commit.

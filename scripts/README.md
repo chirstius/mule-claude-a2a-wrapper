@@ -2,10 +2,11 @@
 
 Developer & test helpers for the Claude A2A wrapper. **These are not part of the Mule application**
 (they're deliberately kept out of `claude-a2a-adapter/` so the project imports cleanly into Anypoint
-Studio and packages without stray files). PowerShell 5.1+ on Windows; `webhook-receiver.py` needs Python 3.
+Studio and packages without stray files). Each script ships in **PowerShell (`.ps1`)** and **bash (`.sh`)** -
+use PowerShell 5.1+ on Windows, or bash + `curl` + `jq` on macOS/Linux; `webhook-receiver.py` needs Python 3.
 
 ## Local dev loop (no Anypoint Studio)
-The build → hot-deploy → wait-until-ready dev loop is provided by the **`mule-headless-dev`** Claude
+The build → hot-deploy → wait-until-ready dev loop is provided by the **[`mule-headless-dev`](https://github.com/chirstius/mule-headless-dev)** Claude
 skill (`setup` / `start` / `redeploy` / `restart` / `stop`). Run those to stand up and refresh the
 runtime, then use the harnesses below to exercise it.
 

@@ -32,10 +32,13 @@ Full details + the CloudHub Runtime-Manager overrides: **[../docs/CONFIG.md](../
 
 ```bash
 mvn clean package                                  # -> target/*.jar
-# Run locally with Anypoint Studio, the mule-headless-dev workflow, or deploy the jar to CloudHub.
+# Run locally in Anypoint Studio, or deploy the jar to CloudHub.
 # Quick local run example:
 #   mule -M-Dclaude.apiKey=sk-ant-... (or set it in config/secure/local.yaml)
 ```
+
+For a fast headless build → hot-deploy → wait-until-ready local loop, use the
+[mule-headless-dev](https://github.com/chirstius/mule-headless-dev) Claude skill.
 
 The A2A server listens on `a2a.server.path` (default `/a2a`); the agent card is discoverable at
 `<base>/a2a/.well-known/agent-card.json`. See **[../docs/USAGE.md](../docs/USAGE.md)** for the A2A client guide.
