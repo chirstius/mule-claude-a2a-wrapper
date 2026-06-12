@@ -1,0 +1,17 @@
+# Normalize line endings so the repo is cross-platform.
+# Default: detect text vs binary; store text as LF in the repo.
+* text=auto
+
+# Shell scripts MUST be LF (CRLF breaks `bash` on macOS/Linux: "bad interpreter").
+*.sh   text eol=lf
+
+# PowerShell scripts stay CRLF for Windows.
+*.ps1  text eol=crlf
+
+# Common binaries (don't touch line endings).
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.jar  binary
