@@ -17,6 +17,20 @@ A2A client / orchestrator                 Mule wrapper (this project)           
         ▼                                         ▼                                        ▼
 ```
 
+## Downloads (pre-built jars)
+
+Don't want to build from source? The [**latest release**](https://github.com/chirstius/mule-claude-a2a-wrapper/releases/latest)
+attaches ready-to-run Mule application archives — import them via
+`File ▸ Import ▸ Anypoint Studio ▸ Packaged Mule application (.jar)` (Studio / Anypoint Code Builder), or
+deploy straight to a Mule 4 runtime:
+
+- **`…-mule-application.jar`** — the wrapper alone.
+- **`…-mule-application-with-ui.jar`** — the wrapper plus the embedded demo console (served at `/`).
+
+Both bundle their dependencies and include project sources (`META-INF/mule-src`), so they import as fully
+editable projects. They ship with **placeholder** config and **no API key** — set your own
+`claude.agentId` / `claude.environmentId` and key before running (see [docs/CONFIG.md](docs/CONFIG.md)).
+
 ## Repository layout
 
 ```
