@@ -27,7 +27,17 @@ function toggleTheme() {
 const draft = ref('')
 const convo = ref<HTMLElement | null>(null)
 
+// "Stick to bottom": only auto-scroll when the user is already at (or near) the
+// bottom. If they've scrolled up to read earlier content, streaming updates must
+// NOT yank them back down.
+let stick = true
+function onScroll() {
+  const el = convo.value
+  if (!el) return
+  stick = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
 function scrollDown() {
+  if (!stick) return
   nextTick(() => {
     if (convo.value) convo.value.scrollTop = convo.value.scrollHeight
   })
@@ -38,6 +48,7 @@ watch(() => store.turns.length, scrollDown)
 async function submit() {
   const text = draft.value
   draft.value = ''
+  stick = true // the user just sent — always snap to the latest
   await sendText(text)
 }
 function onKey(e: KeyboardEvent) {
@@ -129,7 +140,7 @@ async function openCard() {
 
     <div class="body">
       <div class="main">
-        <div class="conversation" ref="convo">
+        <div class="conversation" ref="convo" @scroll="onScroll">
           <div v-if="!store.turns.length" class="empty">
             <h2>👋 Chat with the wrapped Claude agent over A2A</h2>
             <p>
